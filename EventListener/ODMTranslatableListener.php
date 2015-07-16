@@ -17,53 +17,14 @@ use Doctrine\ODM\MongoDB\Event\LifecycleEventArgs;
 use Doctrine\ODM\MongoDB\Event\LoadClassMetadataEventArgs;
 use Doctrine\ODM\MongoDB\Mapping\ClassMetadata;
 use Doctrine\ODM\MongoDB\Mapping\ClassMetadataInfo;
+use Sylius\Component\Translation\Model\TranslatableInterface;
 
 /**
  * @author Gonzalo Vilaseca <gvilaseca@reiss.co.uk>
  * @author Prezent Internet B.V. <info@prezent.nl>
  */
-class ODMTranslatableListener implements EventSubscriber
+class ODMTranslatableListener extends AbstractTranslatableListener implements EventSubscriber
 {
-    /**
-     * Locale to use for translations.
-     *
-     * @var string
-     */
-    private $currentLocale;
-
-    /**
-     * Locale to use when the current locale is not available.
-     *
-     * @var string
-     */
-    private $fallbackLocale;
-
-    /**
-     * Mapping.
-     *
-     * @var array
-     */
-    private $mappings;
-
-    /**
-     * @param array $mappings
-     * @param string $fallbackLocale
-     */
-    public function __construct(array $mappings, $fallbackLocale)
-    {
-        $this->mappings = $mappings;
-        $this->fallbackLocale = $fallbackLocale;
-    }
-
-    /**
-     * {@inheritdoc}
-     */
-    public function setCurrentLocale($currentLocale)
-    {
-        $this->currentLocale = $currentLocale;
-
-        return $this;
-    }
 
     /**
      * {@inheritdoc}
@@ -114,56 +75,93 @@ class ODMTranslatableListener implements EventSubscriber
             return;
         }
 
-        $config = $this->mappings[$metadata->name];
-        $mapping = $config['translation']['mapping'];
+        if (!isset($this->configs[$metadata->name])) {
+            return;
+        }
 
         $metadata->mapManyEmbedded(array(
-            'fieldName'      => $mapping['translatable']['translations'],
-            'targetDocument' => $config['translation']['model'],
+            'fieldName'     => 'translations',
+            'targetDocument'=> $this->configs[$metadata->name]['translation']['model'],
             'strategy'       => 'set'
         ));
     }
 
     /**
-     * Add mapping data to a translation entity
+     * Add mapping data to a translation entity.
      *
      * @param ClassMetadata $metadata
      */
     private function mapTranslation(ClassMetadata $metadata)
     {
         // In the case A -> B -> TranslationInterface, B might not have mapping defined as it
-        // is probably defined in A, so in that case, we just return;
-        if (!isset($this->mappings[$metadata->name])) {
+        // is probably defined in A, so in that case, we just return.
+        if (!isset($this->configs[$metadata->name])) {
             return;
         }
 
-        $config = $this->mappings[$metadata->name];
-        $mapping = $config['translation']['mapping'];
+        $metadata->mapManyToOne(array(
+            'fieldName'    => 'translatable' ,
+            'targetEntity' => $this->configs[$metadata->name]['model'],
+            'inversedBy'   => 'translations' ,
+            'joinColumns'  => array(array(
+                'name'                 => 'translatable_id',
+                'referencedColumnName' => 'id',
+                'onDelete'             => 'CASCADE',
+                'nullable'             => false,
+            )),
+        ));
 
-        $metadata->isEmbeddedDocument = true;
-        $metadata->isMappedSuperclass = false;
-        $metadata->setIdentifier(null);
-
-        // Map locale field.
-        if (!$metadata->hasField($mapping['translation']['locale'])) {
+        if (!$metadata->hasField('locale')) {
             $metadata->mapField(array(
-                'fieldName' => $mapping['translation']['locale'],
+                'fieldName' => 'locale',
                 'type'      => 'string',
+                'nullable'  => false,
             ));
         }
 
         // Map unique index.
-        $keys = array(
-            $mapping['translation']['translatable'] => 1,
-            $mapping['translation']['locale'] => 1
+        $columns = array(
+            $metadata->getSingleAssociationJoinColumnName('translatable'),
+            'locale'
         );
 
-        if (!$this->hasUniqueIndex($metadata, $keys)) {
-            $metadata->addIndex($keys, array(
-                'unique' => true
+        if (!$this->hasUniqueConstraint($metadata, $columns)) {
+            $constraints = isset($metadata->table['uniqueConstraints']) ? $metadata->table['uniqueConstraints'] : array();
+
+            $constraints[$metadata->getTableName().'_uniq_trans'] = array(
+                'columns' => $columns,
+            );
+
+            $metadata->setPrimaryTable(array(
+                'uniqueConstraints' => $constraints,
             ));
         }
     }
+
+    /**
+     * Check if an unique constraint has been defined.
+     *
+     * @param ClassMetadata $metadata
+     * @param array         $columns
+     *
+     * @return bool
+     */
+    private function hasUniqueConstraint(ClassMetadata $metadata, array $columns)
+    {
+        if (!isset($metadata->table['uniqueConstraints'])) {
+            return false;
+        }
+
+        foreach ($metadata->table['uniqueConstraints'] as $constraint) {
+            if (!array_diff($constraint['columns'], $columns)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+
 
     /**
      * Load translations
@@ -174,22 +172,11 @@ class ODMTranslatableListener implements EventSubscriber
     {
         $document = $args->getDocument();
 
-        // Sometimes $document is a doctrine proxy class, we therefore need to retrieve it's real class
-        $name = $args->getDocumentManager()->getClassMetadata(get_class($document))->getName();
-
-        if (!isset($this->mappings[$name])) {
+        if (!$document instanceof TranslatableInterface) {
             return;
         }
 
-        $metadata = $this->mappings[$name];
-
-        if (isset($metadata['fallback_locale'])) {
-            $setter = 'set'.ucfirst($metadata['fallback_locale']);
-            $document->$setter($this->fallbackLocale);
-        }
-        if (isset($metadata['current_locale'])) {
-            $setter = 'set'.ucfirst($metadata['current_locale']);
-            $document->$setter($this->currentLocale);
-        }
+        $document->setCurrentLocale($this->localeProvider->getCurrentLocale());
+        $document->setFallbackLocale($this->localeProvider->getFallbackLocale());
     }
 }
